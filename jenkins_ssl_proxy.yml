@@ -1,0 +1,83 @@
+---
+- name: Secure Jenkins with Nginx + Let's Encrypt
+  hosts: jenkins
+  become: true
+
+  vars:
+    domain_name: jenkins.gangars.com
+    email: admin@jenkins.gangars.com
+    webroot_path: /var/www/html
+
+  tasks:
+
+    - name: Install Nginx and Certbot
+      apt:
+        name:
+          - nginx
+          - certbot
+          - python3-certbot-nginx
+        state: present
+        update_cache: yes
+
+    - name: Create webroot directory for Let's Encrypt
+      file:
+        path: "{{ webroot_path }}/.well-known/acme-challenge"
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: '0755'
+        recurse: yes
+
+    - name: Configure Nginx temporary HTTP site (no redirect)
+      copy:
+        dest: /etc/nginx/sites-available/jenkins
+        content: |
+          server {
+              listen 80;
+              server_name {{ domain_name }};
+
+              location /.well-known/acme-challenge/ {
+                  root {{ webroot_path }};
+              }
+
+              location / {
+                  proxy_pass http://localhost:8080;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+              }
+          }
+
+    - name: Enable Jenkins site
+      file:
+        src: /etc/nginx/sites-available/jenkins
+        dest: /etc/nginx/sites-enabled/jenkins
+        state: link
+        force: true
+
+    - name: Remove default Nginx site if present
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+
+    - name: Reload Nginx
+      command: nginx -s reload
+
+    - name: Obtain Let's Encrypt certificate using webroot
+      command: >
+        certbot certonly --webroot
+        -w {{ webroot_path }}
+        -d {{ domain_name }}
+        --email {{ email }}
+        --agree-tos
+        --non-interactive
+      register: certbot_output
+      failed_when: certbot_output.rc != 0
+      notify: Reload Nginx
+
+  handlers:
+    - name: Reload Nginx
+      service:
+        name: nginx
+        state: reloaded
