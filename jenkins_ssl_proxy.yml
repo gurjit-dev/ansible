@@ -5,8 +5,9 @@
 
   vars:
     domain_name: jenkins.gangars.com
-    email: admin@jenkins.gangars.com
+    email: gurjit.singh.sre@gmail.com
     webroot_path: /var/www/html
+    cert_path: "/etc/letsencrypt/live/{{ domain_name }}"
 
   tasks:
 
@@ -74,10 +75,33 @@
         --non-interactive
       register: certbot_output
       failed_when: certbot_output.rc != 0
-      notify: Reload Nginx
+    - name: Configure HTTPS site with SSL
+      copy:
+        dest: /etc/nginx/sites-available/jenkins
+        content: |
+          server {
+              listen 80;
+              server_name {{ domain_name }};
+              return 301 https://$host$request_uri;
+          }
 
-  handlers:
-    - name: Reload Nginx
+          server {
+              listen 443 ssl;
+              server_name {{ domain_name }};
+
+              ssl_certificate {{ cert_path }}/fullchain.pem;
+              ssl_certificate_key {{ cert_path }}/privkey.pem;
+
+              location / {
+                  proxy_pass http://localhost:8080;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+              }
+          }
+
+    - name: Reload Nginx to apply HTTPS config
       service:
         name: nginx
         state: reloaded
