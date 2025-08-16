@@ -1,0 +1,135 @@
+---
+- name: Configure Jenkins Agent
+  hosts: jenkins_agents
+  become: true
+
+  vars:
+    java_package: openjdk-17-jre-headless     # or openjdk-21-jre-headless
+    kubectl_version: "v1.33.0"
+    agent_user: "ubuntu"
+
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install base packages
+      apt:
+        name:
+          - "{{ java_package }}"
+          - git
+          - curl
+          - unzip
+          - jq
+          - python3
+          - python3-pip
+          - make
+          - zip
+          - tar
+        state: present
+
+    # ---------------- Docker from official repo ----------------
+    - name: Remove conflicting distro Docker packages (if any)
+      apt:
+        name:
+          - docker.io
+          - docker-doc
+          - docker-compose
+          - podman-docker
+          - containerd
+          - runc
+        state: absent
+      ignore_errors: true
+
+    - name: Ensure APT keyring directory exists
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Add Docker GPG key
+      get_url:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        mode: "0644"
+
+    - name: Set Docker repo arch fact
+      set_fact:
+        docker_arch: "{{ 'arm64' if ansible_architecture in ['aarch64','arm64'] else 'amd64' }}"
+
+    - name: Add Docker APT repository
+      apt_repository:
+        repo: "deb [arch={{ docker_arch }} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        filename: docker
+        state: present
+
+    - name: Install Docker CE and plugins
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: yes
+
+    - name: Enable and start Docker
+      systemd:
+        name: docker
+        enabled: true
+        state: started
+
+    - name: Ensure docker group exists
+      group:
+        name: docker
+        state: present
+
+    - name: Add agent user to docker group
+      user:
+        name: "{{ agent_user }}"
+        groups: docker
+        append: yes
+
+    - name: Reset SSH connection so new group membership is seen
+      meta: reset_connection
+    # -----------------------------------------------------------
+
+    # --- AWS CLI v2 ---
+    - name: Install AWS CLI v2 if not present
+      shell: |
+        if ! command -v aws >/dev/null 2>&1; then
+          tmpdir=$(mktemp -d)
+          curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o $tmpdir/awscliv2.zip
+          unzip -q $tmpdir/awscliv2.zip -d $tmpdir
+          sudo $tmpdir/aws/install
+          rm -rf $tmpdir
+        fi
+      args:
+        creates: /usr/local/bin/aws
+
+    # --- kubectl ---
+    - name: Install kubectl
+      get_url:
+        url: "https://dl.k8s.io/release/{{ kubectl_version }}/bin/linux/amd64/kubectl"
+        dest: /usr/local/bin/kubectl
+        mode: '0755'
+
+    # --- Verify ---
+    - name: Verify tools
+      shell: |
+        set -e
+        java -version
+        git --version
+        aws --version
+        (kubectl version --client -o yaml || kubectl version --client)
+        docker --version
+        docker buildx version
+        docker compose version
+        systemctl is-active docker
+      register: versions
+      changed_when: false
+
+    - debug:
+        var: versions.stdout_lines

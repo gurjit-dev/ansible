@@ -1,23 +1,54 @@
 ---
-- name: Install Jenkins on Ubuntu
+- name: Install Jenkins (Ubuntu, keyrings, signed-by)
   hosts: jenkins
   become: yes
+
+  vars:
+    jenkins_key_url: https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
+    jenkins_key_asc: /etc/apt/keyrings/jenkins.asc
+    jenkins_key_gpg: /etc/apt/keyrings/jenkins.gpg
+    jenkins_repo: "deb [signed-by={{ jenkins_key_gpg }}] https://pkg.jenkins.io/debian-stable binary/"
+
   tasks:
-    - name: Install Java
+    - name: Ensure prerequisites (Java 17, ca-certs, gnupg)
       apt:
-        name: openjdk-17-jdk
+        name:
+          - openjdk-17-jre-headless   # or openjdk-17-jdk if you prefer JDK
+          - ca-certificates
+          - gnupg
         state: present
         update_cache: yes
 
-    - name: Add Jenkins GPG key
-      apt_key:
-        url: https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
-        state: present
+    - name: Ensure /etc/apt/keyrings exists
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
 
-    - name: Add Jenkins APT repo
+    - name: Download Jenkins signing key (ASCII)
+      get_url:
+        url: "{{ jenkins_key_url }}"
+        dest: "{{ jenkins_key_asc }}"
+        mode: '0644'
+        force: yes
+
+    - name: Convert Jenkins key to binary keyring (gpg)
+      command: "gpg --dearmor -o {{ jenkins_key_gpg }} {{ jenkins_key_asc }}"
+      args:
+        creates: "{{ jenkins_key_gpg }}"
+
+    # Important: remove any previous repo line WITHOUT signed-by to avoid conflicts
+    - name: Remove legacy Jenkins repo (no signed-by)
       apt_repository:
-        repo: deb https://pkg.jenkins.io/debian-stable binary/
+        repo: "deb https://pkg.jenkins.io/debian-stable binary/"
+        state: absent
+        filename: jenkins
+
+    - name: Add Jenkins apt repository (with signed-by)
+      apt_repository:
+        repo: "{{ jenkins_repo }}"
         state: present
+        filename: jenkins
 
     - name: Install Jenkins
       apt:
@@ -25,8 +56,9 @@
         state: present
         update_cache: yes
 
-    - name: Start and enable Jenkins service
+    - name: Enable and start Jenkins
       systemd:
         name: jenkins
         enabled: yes
         state: started
+        
