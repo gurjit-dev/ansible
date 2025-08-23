@@ -1,0 +1,71 @@
+---
+- hosts: all            # we'll limit to jenkins_test via -l
+  become: yes
+  gather_facts: false
+
+  vars:
+    swapfile_path: /swapfile
+    swap_size_gb: 4
+    swappiness: 10
+
+  tasks:
+    - name: Compute swap size in MiB for dd fallback
+      set_fact:
+        swap_size_mib: "{{ swap_size_gb | int * 1024 }}"
+
+    - name: Check if swapfile already exists
+      stat:
+        path: "{{ swapfile_path }}"
+      register: swapfile_stat
+
+    - name: Try to create swapfile with fallocate (fast)
+      command: "fallocate -l {{ swap_size_gb }}G {{ swapfile_path }}"
+      args:
+        creates: "{{ swapfile_path }}"
+      register: fallocate_result
+      failed_when: false
+
+    - name: Fallback to dd if fallocate failed and file not created
+      command: "dd if=/dev/zero of={{ swapfile_path }} bs=1M count={{ swap_size_mib }}"
+      when: (not swapfile_stat.stat.exists) and (fallocate_result.rc is defined and fallocate_result.rc != 0)
+
+    - name: Set correct permissions on swapfile
+      file:
+        path: "{{ swapfile_path }}"
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Initialize swap area (mkswap) if not formatted before
+      command: "mkswap {{ swapfile_path }}"
+      args:
+        creates: /var/lib/.mkswap.done
+
+    - name: Mark mkswap done
+      file:
+        path: /var/lib/.mkswap.done
+        state: touch
+
+    - name: Ensure fstab entry exists
+      lineinfile:
+        path: /etc/fstab
+        regexp: '^/swapfile\s+none\s+swap\s+'
+        line: "{{ swapfile_path }} none swap sw 0 0"
+
+    - name: Check currently active swap
+      command: "swapon --show --noheadings --raw"
+      register: swapon_show
+      changed_when: false
+
+    - name: Enable swap now (no-op if already active)
+      command: "swapon {{ swapfile_path }}"
+      when: swapfile_path not in swapon_show.stdout
+
+    - name: Set swappiness
+      copy:
+        dest: /etc/sysctl.d/99-swappiness.conf
+        content: "vm.swappiness={{ swappiness }}\n"
+
+    - name: Apply sysctl settings
+      command: sysctl --system
+      
